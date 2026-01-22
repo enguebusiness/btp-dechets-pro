@@ -10,7 +10,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
 
-  const handleLogin = async (e: React.FormEvent) => {
+    const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
 
@@ -20,11 +20,12 @@ export default function LoginPage() {
       password,
     })
 
+    console.log('Error object:', error)
+    
     if (error) {
-      console.error('❌ Login failed:', error.message)
-      console.error('Error code:', error.status)
-      console.error('Full error:', error)
-      alert(`Login error: ${error.message}`)
+      const errorMsg = error.message || 'Unknown error'
+      console.error('❌ Login failed:', errorMsg)
+      alert(`❌ Login failed: ${errorMsg}`)
       setLoading(false)
     } else {
       console.log('✅ Login success!', data.user.email)

@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
   if (token_hash && type) {
     const supabase = createClient()
     
-    // @ts-ignore - Supabase type issue with verifyOtp
+    // @ts-expect-error - Supabase type compatibility
     const { error } = await supabase.auth.verifyOtp({
       token_hash,
       type,

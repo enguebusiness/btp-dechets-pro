@@ -10,26 +10,37 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
 
-    const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
 
-    const supabase = createClient()
-    const { error, data } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    })
+    try {
+      const supabase = createClient()
+      
+      console.log('📧 Email:', email)
+      console.log('🔐 Password length:', password.length)
+      
+      const { error, data } = await supabase.auth.signInWithPassword({
+        email: email.toLowerCase().trim(),
+        password,
+      })
 
-    console.log('Error object:', error)
-    
-    if (error) {
-      const errorMsg = error.message || 'Unknown error'
-      console.error('❌ Login failed:', errorMsg)
-      alert(`❌ Login failed: ${errorMsg}`)
+      console.log('Response error:', error)
+      console.log('Response data:', data)
+      
+      if (error) {
+        console.error('❌ Error message:', error.message)
+        console.error('❌ Error status:', error.status)
+        alert(`Error: ${error.message}`)
+      } else if (data?.user) {
+        console.log('✅ Success! User:', data.user.email)
+        router.push('/dashboard')
+      }
+    } catch (err) {
+      console.error('❌ Caught exception:', err)
+      alert(`Exception: ${err}`)
+    } finally {
       setLoading(false)
-    } else {
-      console.log('✅ Login success!', data.user.email)
-      router.push('/dashboard')
     }
   }
 

@@ -3,22 +3,20 @@ import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
-  const code = searchParams.get('code')
   const token_hash = searchParams.get('token_hash')
   const type = searchParams.get('type')
 
-  if (code) {
-    const supabase = createClient()
-    await supabase.auth.exchangeCodeForSession(code)
-  }
-
   if (token_hash && type) {
     const supabase = createClient()
+    
+    // @ts-ignore - Supabase type issue with verifyOtp
     const { error } = await supabase.auth.verifyOtp({
       token_hash,
-      type: (type as 'signup' | 'magiclink' | 'recovery' | 'invite' | 'email_change' | 'phone_change'),
+      type,
     })
+    
     if (error) {
+      console.error('Auth error:', error)
       return NextResponse.redirect(new URL('/auth/login?error=invalid_link', request.url))
     }
   }

@@ -83,7 +83,7 @@ export default function SignupPage() {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Nom de l'entreprise
+              Nom de l&apos;entreprise
             </label>
             <input
               type="text"

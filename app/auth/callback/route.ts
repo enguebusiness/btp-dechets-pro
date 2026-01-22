@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase'
 import { NextRequest, NextResponse } from 'next/server'
+import type { AuthOtpType } from '@supabase/supabase-js'
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
@@ -16,7 +17,7 @@ export async function GET(request: NextRequest) {
     const supabase = createClient()
     const { error } = await supabase.auth.verifyOtp({
       token_hash,
-      type: type as any,
+      type: type as AuthOtpType,
     })
     if (error) {
       return NextResponse.redirect(new URL('/auth/login?error=invalid_link', request.url))

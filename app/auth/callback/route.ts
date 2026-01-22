@@ -9,10 +9,9 @@ export async function GET(request: NextRequest) {
   if (token_hash && type) {
     const supabase = createClient()
     
-    // @ts-expect-error - Supabase type compatibility
     const { error } = await supabase.auth.verifyOtp({
       token_hash,
-      type,
+      type: type as 'signup' | 'magiclink' | 'recovery' | 'invite' | 'email',
     })
     
     if (error) {

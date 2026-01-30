@@ -4,16 +4,99 @@ import { analyzeInvoiceWithGemini, analyzePdfWithGemini, calculateGlobalConformi
 
 export const maxDuration = 60 // Timeout de 60 secondes pour l'OCR
 
+// Fonction pour verifier et incrementer le compteur de scans
+async function checkAndIncrementScanCount(
+  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
+  userId: string
+): Promise<{ canScan: boolean; scanCount: number; scanLimit: number; remaining: number; isPremium: boolean }> {
+  const currentMonth = new Date().toISOString().substring(0, 7) // YYYY-MM
+
+  try {
+    // Recuperer le profil actuel
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('subscription_status, scan_count_month, scan_month_ref, scan_limit')
+      .eq('id', userId)
+      .single()
+
+    if (profileError && profileError.code !== '42703') {
+      console.error('Erreur profil:', profileError)
+      // En cas d'erreur, autoriser le scan
+      return { canScan: true, scanCount: 0, scanLimit: 5, remaining: 5, isPremium: false }
+    }
+
+    let scanCount = profile?.scan_count_month || 0
+    const isPremium = profile?.subscription_status === 'pro' || profile?.subscription_status === 'enterprise'
+    const scanLimit = isPremium ? 999999 : (profile?.scan_limit || 5)
+
+    // Reset si nouveau mois
+    if (profile?.scan_month_ref !== currentMonth) {
+      scanCount = 0
+    }
+
+    // Verifier si on peut scanner
+    if (scanCount >= scanLimit) {
+      return {
+        canScan: false,
+        scanCount,
+        scanLimit,
+        remaining: 0,
+        isPremium
+      }
+    }
+
+    // Incrementer le compteur
+    const newScanCount = scanCount + 1
+    await supabase
+      .from('profiles')
+      .update({
+        scan_count_month: newScanCount,
+        scan_month_ref: currentMonth,
+      })
+      .eq('id', userId)
+
+    return {
+      canScan: true,
+      scanCount: newScanCount,
+      scanLimit,
+      remaining: Math.max(0, scanLimit - newScanCount),
+      isPremium
+    }
+  } catch (error) {
+    console.error('Erreur comptage scans:', error)
+    // En cas d'erreur, autoriser le scan pour ne pas bloquer l'utilisateur
+    return { canScan: true, scanCount: 0, scanLimit: 5, remaining: 5, isPremium: false }
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createServerSupabaseClient()
 
-    // Vérifier l'authentification
+    // Verifier l'authentification
     const { data: { user }, error: authError } = await supabase.auth.getUser()
     if (authError || !user) {
       return NextResponse.json(
-        { error: 'Non authentifié' },
+        { error: 'Non authentifie' },
         { status: 401 }
+      )
+    }
+
+    // Verifier la limite de scans AVANT de traiter le fichier
+    const usageCheck = await checkAndIncrementScanCount(supabase, user.id)
+    if (!usageCheck.canScan) {
+      return NextResponse.json(
+        {
+          error: 'Limite de scans gratuits atteinte (5/mois)',
+          code: 'SCAN_LIMIT_REACHED',
+          scan_count: usageCheck.scanCount,
+          scan_limit: usageCheck.scanLimit,
+          remaining: 0,
+          is_premium: usageCheck.isPremium,
+          upgrade_message: 'Passez a Bio-Audit Premium pour des scans illimites a 20€/mois',
+          upgrade_url: '/dashboard/settings?tab=abonnement',
+        },
+        { status: 403 }
       )
     }
 
@@ -35,7 +118,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Vérifier que l'exploitation appartient à l'utilisateur (owner_id)
+    // Verifier que l'exploitation appartient a l'utilisateur (owner_id)
     const { data: exploitation, error: exploitationError } = await supabase
       .from('exploitations')
       .select('id, name')
@@ -45,12 +128,12 @@ export async function POST(request: NextRequest) {
 
     if (exploitationError || !exploitation) {
       return NextResponse.json(
-        { error: 'Exploitation non trouvée ou accès non autorisé' },
+        { error: 'Exploitation non trouvee ou acces non autorise' },
         { status: 404 }
       )
     }
 
-    // Vérifier le type de fichier
+    // Verifier le type de fichier
     const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf']
     if (!allowedTypes.includes(file.type)) {
       return NextResponse.json(

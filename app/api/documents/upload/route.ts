@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
       .from('exploitations')
       .select('id')
       .eq('id', exploitationId)
-      .eq('user_id', user.id)
+      .eq('owner_id', user.id)
       .single()
 
     if (exploitationError || !exploitation) {
@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
       exploitation_id: exploitationId,
       user_id: user.id,
       nom_fichier: file.name,
-      type_document: typeDocument,
+      type_doc: typeDocument as 'facture' | 'certificat' | 'bon_livraison' | 'analyse' | 'autre',
       storage_path: storagePath,
       taille: file.size,
       mime_type: file.type,
@@ -101,8 +101,6 @@ export async function POST(request: NextRequest) {
       validation_date: null,
       intrants_extraits: [],
       notes: notes,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
     }
 
     const { data: document, error: insertError } = await supabase
@@ -128,6 +126,10 @@ export async function POST(request: NextRequest) {
         errorMessage = 'Un document avec cet identifiant existe déjà'
       } else if (insertError.code === '42P01') {
         errorMessage = 'La table documents_storage n\'existe pas. Veuillez créer la table dans Supabase.'
+      } else if (insertError.code === '42501' || insertError.message?.includes('row-level security')) {
+        errorMessage = 'Permission refusée: vérifiez les politiques RLS sur documents_storage'
+      } else if (insertError.code === '42703') {
+        errorMessage = `Colonne invalide: ${insertError.message}`
       } else if (insertError.message) {
         errorMessage = insertError.message
       }

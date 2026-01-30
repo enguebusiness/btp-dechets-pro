@@ -4,14 +4,13 @@ import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
 import { useExploitation } from '@/contexts/ExploitationContext'
 import { createClient } from '@/lib/supabase'
-import type { Intrant, Parcelle, IntrantFormData } from '@/types/database'
+import type { Intrant, IntrantFormData } from '@/types/database'
 
 type FilterType = 'all' | 'semence' | 'engrais' | 'phytosanitaire' | 'amendement' | 'autre'
 
 export default function IntrantsPage() {
   const { activeExploitation } = useExploitation()
   const [intrants, setIntrants] = useState<Intrant[]>([])
-  const [parcelles, setParcelles] = useState<Parcelle[]>([])
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
   const [editingIntrant, setEditingIntrant] = useState<Intrant | null>(null)
@@ -44,23 +43,15 @@ export default function IntrantsPage() {
     try {
       setLoading(true)
 
-      const [intrantsRes, parcellesRes] = await Promise.all([
-        supabase
-          .from('intrants')
-          .select('*')
-          .eq('exploitation_id', activeExploitation.id)
-          .order('date_achat', { ascending: false }),
-        supabase
-          .from('parcelles')
-          .select('id, nom')
-          .eq('exploitation_id', activeExploitation.id),
-      ])
+      const { data, error: intrantsError } = await supabase
+        .from('intrants')
+        .select('*')
+        .eq('exploitation_id', activeExploitation.id)
+        .order('date_achat', { ascending: false })
 
-      if (intrantsRes.error && intrantsRes.error.code !== '42P01') throw intrantsRes.error
-      if (parcellesRes.error && parcellesRes.error.code !== '42P01') throw parcellesRes.error
+      if (intrantsError && intrantsError.code !== '42P01') throw intrantsError
 
-      setIntrants(intrantsRes.data || [])
-      setParcelles(parcellesRes.data || [])
+      setIntrants(data || [])
     } catch (err) {
       console.error('Erreur:', err)
       setError('Erreur lors du chargement')
@@ -370,17 +361,13 @@ export default function IntrantsPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Parcelle</label>
-                <select
-                  value={formData.parcelle_id}
-                  onChange={(e) => setFormData({ ...formData, parcelle_id: e.target.value })}
+                <label className="block text-sm font-medium text-gray-700 mb-1">Date d&apos;utilisation</label>
+                <input
+                  type="date"
+                  value={formData.date_utilisation}
+                  onChange={(e) => setFormData({ ...formData, date_utilisation: e.target.value })}
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                >
-                  <option value="">Non affecte</option>
-                  {parcelles.map((p) => (
-                    <option key={p.id} value={p.id}>{p.nom}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Prix total (EUR)</label>

@@ -1,4 +1,4 @@
-// Types pour la base de données Supabase - Bio-Audit / Bio-Shield
+// Types pour la base de données Supabase - Bio-Audit / Bouclier de Conformité
 
 export interface Profile {
   id: string
@@ -29,21 +29,34 @@ export interface Exploitation {
   stripe_customer_id: string | null
   stripe_subscription_id: string | null
   subscription_status: 'active' | 'canceled' | 'past_due' | 'trialing' | null
+  // Bouclier de Conformité
+  agence_bio_verified: boolean
+  agence_bio_id: string | null
+  date_verif_agence_bio: string | null
+  score_securite: number
   created_at: string
   updated_at: string
 }
 
-export interface Parcelle {
+export interface Supplier {
   id: string
   exploitation_id: string
   nom: string
-  surface: number
-  culture_actuelle: string | null
-  type_sol: string | null
-  irrigation: boolean
-  mode_production: 'bio' | 'conversion' | 'conventionnel'
-  date_debut_conversion: string | null
-  coordonnees_gps: string | null
+  siren: string | null
+  siret: string | null
+  adresse: string | null
+  code_postal: string | null
+  ville: string | null
+  statut_bio: 'certifie' | 'en_conversion' | 'non_certifie' | 'inconnu'
+  numero_bio: string | null
+  organisme_certificateur: string | null
+  date_certification: string | null
+  date_expiration_certificat: string | null
+  agence_bio_id: string | null
+  agence_bio_verified: boolean
+  date_derniere_verif: string | null
+  url_certificat: string | null
+  notes: string | null
   created_at: string
   updated_at: string
 }
@@ -53,6 +66,8 @@ export interface Intrant {
   exploitation_id: string
   parcelle_id: string | null
   document_id: string | null
+  supplier_id: string | null
+  source_document_id: string | null
   produit_nom: string
   fournisseur: string | null
   lot_number: string | null
@@ -67,27 +82,8 @@ export interface Intrant {
   type_intrant: 'semence' | 'engrais' | 'phytosanitaire' | 'amendement' | 'autre'
   conformite_status: 'conforme' | 'attention' | 'non_conforme' | null
   conformite_details: string | null
-  notes: string | null
-  created_at: string
-  updated_at: string
-}
-
-export interface Recolte {
-  id: string
-  exploitation_id: string
-  parcelle_id: string
-  culture: string
-  variete: string | null
-  date_recolte: string
-  quantite: number
-  unite: string
-  rendement: number | null
-  qualite: string | null
-  destination: string | null
-  prix_vente: number | null
-  acheteur: string | null
-  numero_lot_sortie: string | null
-  certifie_bio: boolean
+  score_conformite: number | null
+  note_ia: string | null
   notes: string | null
   created_at: string
   updated_at: string
@@ -96,6 +92,7 @@ export interface Recolte {
 export interface CertificatFournisseur {
   id: string
   exploitation_id: string
+  supplier_id: string | null
   fournisseur_nom: string
   numero_certificat: string | null
   organisme_certificateur: string | null
@@ -112,12 +109,14 @@ export interface DocumentStorage {
   id: string
   exploitation_id: string
   user_id: string
+  supplier_id: string | null
   nom_fichier: string
   type_doc: 'facture' | 'certificat' | 'bon_livraison' | 'analyse' | 'autre'
   storage_path: string
   taille: number
   mime_type: string
   conservation_jusqu_a: string
+  siren_fournisseur: string | null
   ocr_processed: boolean
   ocr_data: OcrData | null
   ocr_validated: boolean
@@ -129,8 +128,22 @@ export interface DocumentStorage {
   updated_at: string
 }
 
+export interface AuditLog {
+  id: string
+  exploitation_id: string
+  type: 'verification_agence_bio' | 'scan_facture' | 'verification_fournisseur' | 'alerte_conformite' | 'pack_audit_genere'
+  entite_type: 'exploitation' | 'supplier' | 'intrant' | 'document' | null
+  entite_id: string | null
+  action: string
+  details: Record<string, unknown> | null
+  resultat: 'succes' | 'echec' | 'attention' | null
+  created_at: string
+}
+
 export interface OcrData {
   fournisseur: string | null
+  siren_fournisseur: string | null
+  siret_fournisseur: string | null
   numero_facture: string | null
   date_facture: string | null
   total_ht: number | null
@@ -138,6 +151,8 @@ export interface OcrData {
   lignes: LigneFacture[]
   raw_text: string | null
   confidence_score: number | null
+  // Résultat vérification fournisseur
+  verification_fournisseur: SupplierVerification | null
 }
 
 export interface LigneFacture {
@@ -151,9 +166,33 @@ export interface LigneFacture {
   reference: string | null
   is_bio: boolean | null
   numero_lot: string | null
+  // Analyse de conformité IA
   conformite_status: 'conforme' | 'attention' | 'non_conforme' | null
   conformite_reason: string | null
+  score_conformite: number | null
+  analyse_ia: AnalyseConformiteIA | null
   confidence: number
+}
+
+export interface AnalyseConformiteIA {
+  status: 'conforme' | 'attention' | 'non_conforme'
+  score: number // 0-100
+  raisons: string[]
+  recommandations: string[]
+  reglements_references: string[]
+}
+
+export interface SupplierVerification {
+  found: boolean
+  agence_bio_id: string | null
+  nom_officiel: string | null
+  statut_bio: 'certifie' | 'en_conversion' | 'non_certifie' | 'inconnu'
+  numero_bio: string | null
+  organisme_certificateur: string | null
+  date_certification: string | null
+  activites: string[]
+  url_fiche: string | null
+  date_verification: string
 }
 
 export interface IntrantExtrait {
@@ -167,10 +206,22 @@ export interface IntrantExtrait {
 export interface AlerteCertificat {
   id: string
   fournisseur: string
-  type: 'manquant' | 'expire' | 'expiration_proche'
+  supplier_id?: string
+  type: 'manquant' | 'expire' | 'expiration_proche' | 'non_verifie'
   message: string
   date_expiration: string | null
+  severity: 'warning' | 'critical' | 'info'
+}
+
+export interface AlerteConformite {
+  id: string
+  type: 'intrant_non_conforme' | 'fournisseur_non_certifie' | 'certificat_expire' | 'exploitation_non_verifiee'
+  entite_type: 'intrant' | 'supplier' | 'certificat' | 'exploitation'
+  entite_id: string
+  message: string
   severity: 'warning' | 'critical'
+  details: Record<string, unknown>
+  created_at: string
 }
 
 export interface ConformiteCheck {
@@ -178,6 +229,20 @@ export interface ConformiteCheck {
   reason: string
   details: string[]
   reglement_reference: string | null
+}
+
+// Score de Sécurité
+export interface ScoreSecurite {
+  global: number // 0-100
+  details: {
+    exploitation_verifiee: { score: number; max: number; status: boolean }
+    intrants_conformes: { score: number; max: number; ratio: string }
+    fournisseurs_certifies: { score: number; max: number; ratio: string }
+    certificats_valides: { score: number; max: number; ratio: string }
+  }
+  alertes: AlerteConformite[]
+  recommandations: string[]
+  derniere_maj: string
 }
 
 // Types pour les formulaires et l'UI
@@ -195,19 +260,22 @@ export interface ExploitationFormData {
   surface_totale?: number
 }
 
-export interface ParcelleFormData {
+export interface SupplierFormData {
   nom: string
-  surface: number
-  culture_actuelle?: string
-  type_sol?: string
-  irrigation: boolean
-  mode_production: 'bio' | 'conversion' | 'conventionnel'
-  date_debut_conversion?: string
-  coordonnees_gps?: string
+  siren?: string
+  siret?: string
+  adresse?: string
+  code_postal?: string
+  ville?: string
+  statut_bio?: 'certifie' | 'en_conversion' | 'non_certifie' | 'inconnu'
+  numero_bio?: string
+  organisme_certificateur?: string
+  notes?: string
 }
 
 export interface IntrantFormData {
   parcelle_id?: string
+  supplier_id?: string
   produit_nom: string
   fournisseur?: string
   lot_number?: string
@@ -223,30 +291,32 @@ export interface IntrantFormData {
   notes?: string
 }
 
-// Types pour les statistiques du bilan matière
-export interface BilanMatiere {
+// Types pour le bilan (simplifié pour le pivot)
+export interface BilanConformite {
   periode: {
     debut: string
     fin: string
   }
-  entrees: {
-    par_type: Record<string, number>
-    par_parcelle: Record<string, number>
-    total_kg: number
-    total_valeur: number
+  intrants: {
+    total: number
+    conformes: number
+    attention: number
+    non_conformes: number
+    non_evalues: number
   }
-  sorties: {
-    par_culture: Record<string, number>
-    par_destination: Record<string, number>
-    total_kg: number
-    total_valeur: number
+  fournisseurs: {
+    total: number
+    certifies: number
+    non_certifies: number
+    en_conversion: number
   }
-  stock_theorique: number
-  conformite_bio: {
-    pourcentage: number
-    alertes: string[]
-    intrants_non_conformes: number
+  certificats: {
+    total: number
+    valides: number
+    expires: number
+    a_renouveler: number
   }
+  score_global: number
 }
 
 // Types pour Stripe
@@ -282,7 +352,32 @@ export interface PackAudit {
   periode: { debut: string; fin: string }
   documents: DocumentStorage[]
   certificats: CertificatFournisseur[]
+  suppliers: Supplier[]
   intrants: Intrant[]
-  alertes: AlerteCertificat[]
-  conformite_globale: number
+  alertes: AlerteConformite[]
+  score_securite: ScoreSecurite
+  genere_le: string
+}
+
+// Types pour la vérification Agence Bio
+export interface AgenceBioSearchResult {
+  id: string
+  nom: string
+  siret: string | null
+  siren: string | null
+  adresse: string | null
+  code_postal: string | null
+  ville: string | null
+  numero_bio: string | null
+  statut: 'certifie' | 'en_conversion' | 'non_certifie'
+  organisme_certificateur: string | null
+  activites: string[]
+  url_fiche: string
+}
+
+export interface AgenceBioVerificationResult {
+  success: boolean
+  found: boolean
+  results: AgenceBioSearchResult[]
+  error: string | null
 }

@@ -1,53 +1,19 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import Link from 'next/link'
 import { useExploitation } from '@/contexts/ExploitationContext'
 import { createClient } from '@/lib/supabase'
+import { getConformityBadge } from '@/lib/gemini'
+import type { Intrant } from '@/types/database'
 
-interface RegistreEntry {
-  id: string
-  date: string
-  type: 'entree' | 'sortie'
-  description: string
-  fournisseur_acheteur: string | null
-  quantite: number
-  unite: string
-  numero_lot: string | null
-  certifie_bio: boolean
-  parcelle: string | null
-  source: 'intrant' | 'recolte'
-}
-
-interface IntrantRecord {
-  id: string
-  date_achat: string
-  produit_nom: string
-  fournisseur: string | null
-  quantite: number
-  unite: string
-  lot_number: string | null
-  est_bio: boolean
-  parcelle_id: string | null
-}
-
-interface RecolteRecord {
-  id: string
-  date_recolte: string
-  culture: string
-  variete: string | null
-  acheteur: string | null
-  quantite: number
-  unite: string
-  numero_lot_sortie: string | null
-  certifie_bio: boolean
-  parcelle_id: string | null
-}
+type FilterType = 'all' | 'conforme' | 'attention' | 'non_conforme'
 
 export default function RegistrePage() {
   const { activeExploitation } = useExploitation()
-  const [entries, setEntries] = useState<RegistreEntry[]>([])
+  const [intrants, setIntrants] = useState<Intrant[]>([])
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState<'all' | 'entree' | 'sortie'>('all')
+  const [filter, setFilter] = useState<FilterType>('all')
   const [searchTerm, setSearchTerm] = useState('')
   const [periode, setPeriode] = useState({
     debut: new Date(new Date().getFullYear(), 0, 1).toISOString().split('T')[0],
@@ -61,76 +27,17 @@ export default function RegistrePage() {
     try {
       setLoading(true)
 
-      const [intrantsRes, recoltesRes, parcellesRes] = await Promise.all([
-        supabase
-          .from('intrants')
-          .select('*')
-          .eq('exploitation_id', activeExploitation.id)
-          .gte('date_achat', periode.debut)
-          .lte('date_achat', periode.fin),
-        supabase
-          .from('recoltes')
-          .select('*')
-          .eq('exploitation_id', activeExploitation.id)
-          .gte('date_recolte', periode.debut)
-          .lte('date_recolte', periode.fin),
-        supabase
-          .from('parcelles')
-          .select('id, nom')
-          .eq('exploitation_id', activeExploitation.id),
-      ])
+      const { data, error } = await supabase
+        .from('intrants')
+        .select('*')
+        .eq('exploitation_id', activeExploitation.id)
+        .gte('date_achat', periode.debut)
+        .lte('date_achat', periode.fin)
+        .order('date_achat', { ascending: false })
 
-      const parcelles = parcellesRes.data || []
-      const getParcelleName = (id: string | null) => {
-        if (!id) return null
-        const parcel = parcelles.find((p: { id: string; nom: string }) => p.id === id)
-        return parcel?.nom || null
-      }
+      if (error && error.code !== '42P01') throw error
 
-      const registreEntries: RegistreEntry[] = []
-
-      // Ajouter les intrants (entrees)
-      if (intrantsRes.data) {
-        (intrantsRes.data as IntrantRecord[]).forEach((intrant: IntrantRecord) => {
-          registreEntries.push({
-            id: intrant.id,
-            date: intrant.date_achat,
-            type: 'entree',
-            description: intrant.produit_nom,
-            fournisseur_acheteur: intrant.fournisseur,
-            quantite: intrant.quantite,
-            unite: intrant.unite,
-            numero_lot: intrant.lot_number,
-            certifie_bio: intrant.est_bio,
-            parcelle: getParcelleName(intrant.parcelle_id),
-            source: 'intrant',
-          })
-        })
-      }
-
-      // Ajouter les recoltes (sorties)
-      if (recoltesRes.data) {
-        (recoltesRes.data as RecolteRecord[]).forEach((recolte: RecolteRecord) => {
-          registreEntries.push({
-            id: recolte.id,
-            date: recolte.date_recolte,
-            type: 'sortie',
-            description: recolte.culture + (recolte.variete ? ` - ${recolte.variete}` : ''),
-            fournisseur_acheteur: recolte.acheteur,
-            quantite: recolte.quantite,
-            unite: recolte.unite,
-            numero_lot: recolte.numero_lot_sortie,
-            certifie_bio: recolte.certifie_bio,
-            parcelle: getParcelleName(recolte.parcelle_id),
-            source: 'recolte',
-          })
-        })
-      }
-
-      // Trier par date decroissante
-      registreEntries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-
-      setEntries(registreEntries)
+      setIntrants(data || [])
     } catch (err) {
       console.error('Erreur:', err)
     } finally {
@@ -142,13 +49,47 @@ export default function RegistrePage() {
     loadRegistre()
   }, [loadRegistre])
 
-  const filteredEntries = entries
-    .filter(e => filter === 'all' || e.type === filter)
-    .filter(e =>
-      e.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (e.fournisseur_acheteur?.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      (e.numero_lot?.toLowerCase().includes(searchTerm.toLowerCase()))
+  const filteredIntrants = intrants
+    .filter(i => filter === 'all' || i.conformite_status === filter)
+    .filter(i =>
+      i.produit_nom.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (i.fournisseur?.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (i.lot_number?.toLowerCase().includes(searchTerm.toLowerCase()))
     )
+
+  // Calcul des statistiques
+  const stats = {
+    total: intrants.length,
+    conformes: intrants.filter(i => i.conformite_status === 'conforme').length,
+    attention: intrants.filter(i => i.conformite_status === 'attention').length,
+    non_conformes: intrants.filter(i => i.conformite_status === 'non_conforme').length,
+  }
+
+  const exportCSV = () => {
+    const headers = ['Date', 'Produit', 'Fournisseur', 'Quantite', 'Unite', 'N° Lot', 'Bio', 'Conformite', 'Note IA']
+    const rows = filteredIntrants.map(i => [
+      new Date(i.date_achat).toLocaleDateString('fr-FR'),
+      i.produit_nom,
+      i.fournisseur || '',
+      i.quantite.toString(),
+      i.unite,
+      i.lot_number || '',
+      i.est_bio ? 'Oui' : 'Non',
+      i.conformite_status || 'Non evalue',
+      i.note_ia || '',
+    ])
+
+    const csv = [headers, ...rows].map(row => row.join(';')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `registre-achats-${activeExploitation?.name}-${periode.debut}-${periode.fin}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
 
   if (!activeExploitation) {
     return (
@@ -162,15 +103,49 @@ export default function RegistrePage() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Registre</h1>
-          <p className="text-gray-600">Tracabilite complete des entrees et sorties</p>
+          <h1 className="text-2xl font-bold text-gray-900">Registre des Achats</h1>
+          <p className="text-gray-600">Tracabilite et conformite de vos intrants Bio</p>
         </div>
-        <button className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors">
-          <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-          Exporter
-        </button>
+        <div className="flex gap-2">
+          <Link
+            href="/dashboard/mangetout"
+            className="inline-flex items-center px-4 py-2 border border-green-600 text-green-600 rounded-lg hover:bg-green-50 transition-colors"
+          >
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Scanner facture
+          </Link>
+          <button
+            onClick={exportCSV}
+            className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+          >
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Exporter CSV
+          </button>
+        </div>
+      </div>
+
+      {/* Statistiques de conformite */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
+          <p className="text-sm text-gray-500">Total achats</p>
+          <p className="text-2xl font-bold text-gray-900">{stats.total}</p>
+        </div>
+        <div className="bg-white rounded-xl p-4 shadow-sm border border-green-100">
+          <p className="text-sm text-gray-500">Conformes</p>
+          <p className="text-2xl font-bold text-green-600">{stats.conformes}</p>
+        </div>
+        <div className="bg-white rounded-xl p-4 shadow-sm border border-orange-100">
+          <p className="text-sm text-gray-500">Attention</p>
+          <p className="text-2xl font-bold text-orange-600">{stats.attention}</p>
+        </div>
+        <div className="bg-white rounded-xl p-4 shadow-sm border border-red-100">
+          <p className="text-sm text-gray-500">Non conformes</p>
+          <p className="text-2xl font-bold text-red-600">{stats.non_conformes}</p>
+        </div>
       </div>
 
       {/* Filtres */}
@@ -179,7 +154,7 @@ export default function RegistrePage() {
           <div className="flex-1">
             <input
               type="text"
-              placeholder="Rechercher..."
+              placeholder="Rechercher produit, fournisseur, lot..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
@@ -200,19 +175,22 @@ export default function RegistrePage() {
             />
           </div>
           <div className="flex gap-2">
-            {(['all', 'entree', 'sortie'] as const).map((type) => (
-              <button
-                key={type}
-                onClick={() => setFilter(type)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
-                  filter === type
-                    ? 'bg-green-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                {type === 'all' ? 'Tous' : type === 'entree' ? 'Entrees' : 'Sorties'}
-              </button>
-            ))}
+            {(['all', 'conforme', 'attention', 'non_conforme'] as FilterType[]).map((type) => {
+              const badge = type === 'all' ? null : getConformityBadge(type)
+              return (
+                <button
+                  key={type}
+                  onClick={() => setFilter(type)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
+                    filter === type
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  {type === 'all' ? 'Tous' : `${badge?.emoji} ${badge?.label}`}
+                </button>
+              )
+            })}
           </div>
         </div>
       </div>
@@ -222,15 +200,18 @@ export default function RegistrePage() {
         <div className="flex items-center justify-center h-64">
           <div className="w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full animate-spin"></div>
         </div>
-      ) : filteredEntries.length === 0 ? (
+      ) : filteredIntrants.length === 0 ? (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-12 text-center">
           <svg className="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
           </svg>
           <h3 className="text-lg font-medium text-gray-900 mb-1">Registre vide</h3>
-          <p className="text-gray-500">
-            {searchTerm || filter !== 'all' ? 'Aucun resultat pour cette recherche' : 'Ajoutez des intrants ou enregistrez des recoltes'}
+          <p className="text-gray-500 mb-4">
+            {searchTerm || filter !== 'all' ? 'Aucun resultat pour cette recherche' : 'Scannez vos factures pour alimenter le registre'}
           </p>
+          <Link href="/dashboard/mangetout" className="text-green-600 hover:underline">
+            Scanner une facture
+          </Link>
         </div>
       ) : (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -239,66 +220,66 @@ export default function RegistrePage() {
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Fournisseur/Acheteur</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Produit</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Fournisseur</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Quantite</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">N° Lot</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Parcelle</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bio</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Conformite</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {filteredEntries.map((entry) => (
-                  <tr key={`${entry.source}-${entry.id}`} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 text-sm text-gray-900">
-                      {new Date(entry.date).toLocaleDateString('fr-FR')}
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                        entry.type === 'entree'
-                          ? 'bg-blue-100 text-blue-800'
-                          : 'bg-amber-100 text-amber-800'
-                      }`}>
-                        {entry.type === 'entree' ? 'Entree' : 'Sortie'}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      <p className="text-sm font-medium text-gray-900">{entry.description}</p>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-600">
-                      {entry.fournisseur_acheteur || '-'}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-900">
-                      {entry.quantite.toLocaleString()} {entry.unite}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-600">
-                      {entry.numero_lot || '-'}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-600">
-                      {entry.parcelle || '-'}
-                    </td>
-                    <td className="px-6 py-4">
-                      {entry.certifie_bio ? (
-                        <span className="inline-flex items-center text-green-600">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                          </svg>
+                {filteredIntrants.map((intrant) => {
+                  const badge = getConformityBadge(intrant.conformite_status)
+                  return (
+                    <tr key={intrant.id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 text-sm text-gray-900">
+                        {new Date(intrant.date_achat).toLocaleDateString('fr-FR')}
+                      </td>
+                      <td className="px-6 py-4">
+                        <p className="text-sm font-medium text-gray-900">{intrant.produit_nom}</p>
+                        {intrant.note_ia && (
+                          <p className="text-xs text-gray-500 mt-1 max-w-xs truncate" title={intrant.note_ia}>
+                            {intrant.note_ia}
+                          </p>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-600">
+                        {intrant.fournisseur || '-'}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-900">
+                        {intrant.quantite.toLocaleString()} {intrant.unite}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-600">
+                        {intrant.lot_number || '-'}
+                      </td>
+                      <td className="px-6 py-4">
+                        {intrant.est_bio ? (
+                          <span className="inline-flex items-center text-green-600">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className={`inline-flex items-center px-2 py-1 text-xs font-medium rounded-full ${badge.bgColor} ${badge.color}`}>
+                          {badge.emoji} {badge.label}
                         </span>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
 
-          {/* Pagination / Info */}
+          {/* Info */}
           <div className="px-6 py-4 bg-gray-50 border-t border-gray-200">
             <p className="text-sm text-gray-600">
-              {filteredEntries.length} enregistrement(s) sur la periode
+              {filteredIntrants.length} enregistrement(s) sur la periode
             </p>
           </div>
         </div>

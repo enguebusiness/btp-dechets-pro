@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getStripe, PRO_PRICE_ID, getBaseUrl } from '@/lib/stripe'
+import { getStripe, getPriceId, PLANS, getBaseUrl, type PlanType } from '@/lib/stripe'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 
 export async function POST(request: NextRequest) {
@@ -17,11 +17,22 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json()
-    const { exploitationId } = body
+    const { exploitationId, plan = 'monthly' } = body as {
+      exploitationId: string
+      plan?: PlanType
+    }
 
     if (!exploitationId) {
       return NextResponse.json(
         { error: 'ID exploitation requis' },
+        { status: 400 }
+      )
+    }
+
+    // Valider le plan
+    if (!PLANS[plan]) {
+      return NextResponse.json(
+        { error: 'Plan invalide. Utilisez "monthly" ou "yearly"' },
         { status: 400 }
       )
     }
@@ -62,15 +73,19 @@ export async function POST(request: NextRequest) {
         .eq('id', exploitationId)
     }
 
-    // Vérifier si le prix est configuré
-    if (!PRO_PRICE_ID) {
+    // Obtenir le price ID pour le plan choisi
+    let priceId: string
+    try {
+      priceId = getPriceId(plan)
+    } catch {
       return NextResponse.json(
-        { error: 'Configuration Stripe incomplète' },
+        { error: `Configuration Stripe incomplète pour le plan ${plan}` },
         { status: 500 }
       )
     }
 
     const baseUrl = getBaseUrl()
+    const planConfig = PLANS[plan]
 
     // Créer la session de checkout
     const session = await stripe.checkout.sessions.create({
@@ -79,7 +94,7 @@ export async function POST(request: NextRequest) {
       payment_method_types: ['card'],
       line_items: [
         {
-          price: PRO_PRICE_ID,
+          price: priceId,
           quantity: 1,
         },
       ],
@@ -88,11 +103,13 @@ export async function POST(request: NextRequest) {
       metadata: {
         exploitation_id: exploitationId,
         user_id: user.id,
+        plan: plan,
       },
       subscription_data: {
         metadata: {
           exploitation_id: exploitationId,
           user_id: user.id,
+          plan: plan,
         },
       },
       allow_promotion_codes: true,
@@ -110,6 +127,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       sessionId: session.id,
       url: session.url,
+      plan: planConfig,
     })
   } catch (error) {
     console.error('Erreur création checkout:', error)
@@ -118,4 +136,12 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     )
   }
+}
+
+// Endpoint GET pour récupérer les plans disponibles
+export async function GET() {
+  return NextResponse.json({
+    plans: PLANS,
+    currency: 'EUR',
+  })
 }

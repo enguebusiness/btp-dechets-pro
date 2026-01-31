@@ -348,7 +348,7 @@ export function generatePackAuditPDF(data: PackAuditData): jsPDF {
         doc.type_doc === 'analyse' ? 'Analyse' : 'Autre'
 
       return [
-        doc.nom_fichier.substring(0, 40),
+        (doc.file_name || '').substring(0, 40),
         typeLabel,
         new Date(doc.created_at).toLocaleDateString('fr-FR'),
         doc.ocr_processed ? 'Oui' : 'Non',

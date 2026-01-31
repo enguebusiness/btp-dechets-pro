@@ -6,8 +6,11 @@ export interface Profile {
   full_name: string | null
   avatar_url: string | null
   phone: string | null
+  // Colonnes existantes dans Supabase
   verification_count: number
-  subscription_status: 'free' | 'pro' | 'enterprise' | null
+  last_verification_reset: string | null
+  scan_limit: number // Valeur par defaut 5, ajoutee par migration
+  subscription_status: 'inactive' | 'active' | 'pro' | 'enterprise' | null
   created_at: string
   updated_at: string
 }
@@ -108,21 +111,17 @@ export interface CertificatFournisseur {
 export interface DocumentStorage {
   id: string
   exploitation_id: string
-  user_id: string
   supplier_id: string | null
-  nom_fichier: string
-  type_doc: 'facture' | 'certificat' | 'bon_livraison' | 'analyse' | 'autre'
+  // Colonnes reelles de la table documents_storage dans Supabase
+  file_name: string // Colonne reelle (pas nom_fichier)
+  type_doc: string // 'facture' | 'certificat' | etc.
+  date_document: string // Date du document
   storage_path: string
-  taille: number
-  mime_type: string
   conservation_jusqu_a: string
+  statut: 'A_VERIFIER' | 'VERIFIE' | 'ARCHIVE'
   siren_fournisseur: string | null
   ocr_processed: boolean
   ocr_data: OcrData | null
-  ocr_validated: boolean
-  validation_date: string | null
-  intrants_extraits: IntrantExtrait[]
-  certificat_fournisseur_id: string | null
   notes: string | null
   created_at: string
   updated_at: string

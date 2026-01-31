@@ -166,7 +166,7 @@ export default function CoffreFortPage() {
   }
 
   const filteredDocuments = documents.filter(doc =>
-    doc.nom_fichier.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    doc.file_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (doc.notes?.toLowerCase().includes(searchTerm.toLowerCase()))
   )
 
@@ -318,7 +318,7 @@ export default function CoffreFortPage() {
                     Type
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Taille
+                    Statut
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Date
@@ -342,7 +342,7 @@ export default function CoffreFortPage() {
                           </svg>
                         </div>
                         <div>
-                          <p className="font-medium text-gray-900 truncate max-w-xs">{doc.nom_fichier}</p>
+                          <p className="font-medium text-gray-900 truncate max-w-xs">{doc.file_name}</p>
                           {doc.notes && (
                             <p className="text-sm text-gray-500 truncate max-w-xs">{doc.notes}</p>
                           )}
@@ -354,22 +354,27 @@ export default function CoffreFortPage() {
                         {getTypeLabel(doc.type_doc)}
                       </span>
                     </td>
-                    <td className="px-6 py-4 text-sm text-gray-500">
-                      {formatFileSize(doc.taille)}
+                    <td className="px-6 py-4 text-sm">
+                      <span className={`px-2 py-1 rounded-full text-xs ${
+                        doc.statut === 'VERIFIE' ? 'bg-green-100 text-green-800' :
+                        doc.statut === 'ARCHIVE' ? 'bg-blue-100 text-blue-800' :
+                        'bg-amber-100 text-amber-800'
+                      }`}>
+                        {doc.statut === 'VERIFIE' ? 'Verifie' :
+                         doc.statut === 'ARCHIVE' ? 'Archive' : 'A verifier'}
+                      </span>
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-500">
                       {new Date(doc.created_at).toLocaleDateString('fr-FR')}
                     </td>
                     <td className="px-6 py-4">
-                      {doc.ocr_validated ? (
+                      {doc.ocr_processed ? (
                         <span className="inline-flex items-center text-green-600">
                           <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                           </svg>
-                          Valide
+                          Traite
                         </span>
-                      ) : doc.ocr_processed ? (
-                        <span className="text-amber-600">En attente</span>
                       ) : (
                         <span className="text-gray-400">-</span>
                       )}
@@ -508,7 +513,7 @@ export default function CoffreFortPage() {
             <dl className="space-y-4">
               <div>
                 <dt className="text-sm text-gray-500">Nom du fichier</dt>
-                <dd className="font-medium text-gray-900">{selectedDocument.nom_fichier}</dd>
+                <dd className="font-medium text-gray-900">{selectedDocument.file_name}</dd>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -520,8 +525,11 @@ export default function CoffreFortPage() {
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-sm text-gray-500">Taille</dt>
-                  <dd className="font-medium text-gray-900">{formatFileSize(selectedDocument.taille)}</dd>
+                  <dt className="text-sm text-gray-500">Statut</dt>
+                  <dd className="font-medium text-gray-900">
+                    {selectedDocument.statut === 'VERIFIE' ? 'Verifie' :
+                     selectedDocument.statut === 'ARCHIVE' ? 'Archive' : 'A verifier'}
+                  </dd>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
@@ -536,12 +544,10 @@ export default function CoffreFortPage() {
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-sm text-gray-500">Statut OCR</dt>
+                  <dt className="text-sm text-gray-500">OCR</dt>
                   <dd>
-                    {selectedDocument.ocr_validated ? (
-                      <span className="text-green-600 font-medium">Valide</span>
-                    ) : selectedDocument.ocr_processed ? (
-                      <span className="text-amber-600 font-medium">En attente de validation</span>
+                    {selectedDocument.ocr_processed ? (
+                      <span className="text-green-600 font-medium">Traite</span>
                     ) : (
                       <span className="text-gray-400">Non traite</span>
                     )}

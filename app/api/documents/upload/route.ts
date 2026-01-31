@@ -8,11 +8,11 @@ export async function POST(request: NextRequest) {
   try {
     const supabase = await createServerSupabaseClient()
 
-    // Vérifier l'authentification
+    // Verifier l'authentification
     const { data: { user }, error: authError } = await supabase.auth.getUser()
     if (authError || !user) {
       return NextResponse.json(
-        { error: 'Non authentifié' },
+        { error: 'Non authentifie' },
         { status: 401 }
       )
     }
@@ -21,7 +21,6 @@ export async function POST(request: NextRequest) {
     const file = formData.get('file') as File | null
     const exploitationId = formData.get('exploitationId') as string | null
     const typeDocument = formData.get('typeDocument') as string || 'autre'
-    const notes = formData.get('notes') as string || null
 
     if (!file) {
       return NextResponse.json(
@@ -37,7 +36,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Vérifier que l'exploitation appartient à l'utilisateur
+    // Verifier que l'exploitation appartient a l'utilisateur
     const { data: exploitation, error: exploitationError } = await supabase
       .from('exploitations')
       .select('id')
@@ -47,12 +46,12 @@ export async function POST(request: NextRequest) {
 
     if (exploitationError || !exploitation) {
       return NextResponse.json(
-        { error: 'Exploitation non trouvée' },
+        { error: 'Exploitation non trouvee ou acces refuse' },
         { status: 404 }
       )
     }
 
-    // Vérifier la taille (max 50MB)
+    // Verifier la taille (max 50MB)
     const maxSize = 50 * 1024 * 1024
     if (file.size > maxSize) {
       return NextResponse.json(
@@ -61,7 +60,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Générer un nom de fichier unique
+    // Generer un nom de fichier unique
     const fileExtension = file.name.split('.').pop() || ''
     const uniqueFileName = `${uuidv4()}.${fileExtension}`
     const storagePath = `${exploitationId}/${uniqueFileName}`
@@ -85,22 +84,23 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Créer l'entrée en base de données
+    // Calculer la date de conservation (5 ans pour documents Bio)
+    const dateDocument = new Date()
+    const conservationDate = new Date()
+    conservationDate.setFullYear(conservationDate.getFullYear() + 5)
+
+    // Creer l'entree en base de donnees
+    // IMPORTANT: Utilise les colonnes reelles de documents_storage
     const documentData = {
       id: uuidv4(),
       exploitation_id: exploitationId,
-      user_id: user.id,
-      nom_fichier: file.name,
-      type_doc: typeDocument as 'facture' | 'certificat' | 'bon_livraison' | 'analyse' | 'autre',
+      file_name: file.name, // Colonne reelle = file_name (pas nom_fichier)
+      type_doc: typeDocument,
+      date_document: dateDocument.toISOString().split('T')[0], // Colonne reelle = date_document
       storage_path: storagePath,
-      taille: file.size,
-      mime_type: file.type,
-      ocr_processed: false,
-      ocr_data: null,
-      ocr_validated: false,
-      validation_date: null,
-      intrants_extraits: [],
-      notes: notes,
+      conservation_jusqu_a: conservationDate.toISOString().split('T')[0], // Colonne reelle
+      statut: 'A_VERIFIER', // Colonne reelle avec valeur par defaut
+      ocr_processed: false, // Sera ajoute par migration
     }
 
     const { data: document, error: insertError } = await supabase
@@ -112,24 +112,58 @@ export async function POST(request: NextRequest) {
     if (insertError) {
       console.error('Erreur insertion base:', insertError)
 
-      // En cas d'erreur d'insertion, supprimer le fichier uploadé
+      // En cas d'erreur d'insertion, supprimer le fichier uploade
       await supabase.storage
         .from('documents')
         .remove([storagePath])
 
-      // Analyser l'erreur pour donner un message plus précis
+      // Analyser l'erreur pour donner un message plus precis
       let errorMessage = 'Erreur lors de l\'enregistrement'
 
       if (insertError.code === '23503') {
-        errorMessage = 'Référence invalide: l\'exploitation n\'existe pas'
+        errorMessage = 'Reference invalide: l\'exploitation n\'existe pas'
       } else if (insertError.code === '23505') {
-        errorMessage = 'Un document avec cet identifiant existe déjà'
+        errorMessage = 'Un document avec cet identifiant existe deja'
       } else if (insertError.code === '42P01') {
-        errorMessage = 'La table documents_storage n\'existe pas. Veuillez créer la table dans Supabase.'
+        errorMessage = 'Table documents_storage introuvable'
       } else if (insertError.code === '42501' || insertError.message?.includes('row-level security')) {
-        errorMessage = 'Permission refusée: vérifiez les politiques RLS sur documents_storage'
+        errorMessage = 'Permission refusee: verifiez les politiques RLS'
       } else if (insertError.code === '42703') {
-        errorMessage = `Colonne invalide: ${insertError.message}`
+        // Colonne invalide - essayer sans ocr_processed
+        console.log('Colonne manquante, retry sans ocr_processed')
+        const minimalData = {
+          id: documentData.id,
+          exploitation_id: exploitationId,
+          file_name: file.name,
+          type_doc: typeDocument,
+          date_document: dateDocument.toISOString().split('T')[0],
+          storage_path: storagePath,
+          conservation_jusqu_a: conservationDate.toISOString().split('T')[0],
+        }
+
+        const { data: doc2, error: err2 } = await supabase
+          .from('documents_storage')
+          .insert(minimalData)
+          .select()
+          .single()
+
+        if (err2) {
+          errorMessage = `Colonne invalide: ${err2.message}`
+        } else {
+          // Success avec donnees minimales
+          const { data: signedUrlData } = await supabase.storage
+            .from('documents')
+            .createSignedUrl(storagePath, 3600)
+
+          return NextResponse.json({
+            success: true,
+            document: {
+              ...doc2,
+              signed_url: signedUrlData?.signedUrl,
+            },
+            warning: 'Executez la migration 004_bio_audit_adaptation.sql pour activer toutes les fonctionnalites'
+          })
+        }
       } else if (insertError.message) {
         errorMessage = insertError.message
       }
@@ -140,10 +174,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Générer l'URL signée pour le téléchargement
+    // Generer l'URL signee pour le telechargement
     const { data: signedUrlData } = await supabase.storage
       .from('documents')
-      .createSignedUrl(storagePath, 3600) // URL valide 1 heure
+      .createSignedUrl(storagePath, 3600)
 
     return NextResponse.json({
       success: true,

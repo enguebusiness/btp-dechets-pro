@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
 
 // GET: Obtenir l'usage actuel de l'utilisateur
@@ -14,42 +14,46 @@ export async function GET() {
       )
     }
 
-    // Recuperer le profil
+    // Recuperer le profil avec les colonnes existantes
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('subscription_status, scan_count_month, scan_month_ref, scan_limit')
+      .select('subscription_status, verification_count, last_verification_reset, scan_limit')
       .eq('id', user.id)
       .single()
 
     if (profileError) {
-      // Si les colonnes n'existent pas encore, retourner des valeurs par defaut
-      if (profileError.code === '42703') {
-        return NextResponse.json({
-          success: true,
-          scan_count: 0,
-          scan_limit: 5,
-          remaining: 5,
-          is_premium: false,
-          subscription_status: 'free',
-          month: new Date().toISOString().substring(0, 7),
-        })
-      }
       console.error('Erreur profil:', profileError)
-      return NextResponse.json(
-        { error: profileError.message },
-        { status: 500 }
-      )
+      // Retourner des valeurs par defaut
+      return NextResponse.json({
+        success: true,
+        scan_count: 0,
+        scan_limit: 5,
+        remaining: 5,
+        is_premium: false,
+        subscription_status: 'inactive',
+        month: new Date().toISOString().substring(0, 7),
+      })
     }
 
-    const currentMonth = new Date().toISOString().substring(0, 7) // YYYY-MM
-    let scanCount = profile?.scan_count_month || 0
+    // Calculer le debut du mois courant
+    const currentMonth = new Date()
+    currentMonth.setDate(1)
+    currentMonth.setHours(0, 0, 0, 0)
+
+    let scanCount = profile?.verification_count || 0
 
     // Reset si nouveau mois
-    if (profile?.scan_month_ref !== currentMonth) {
+    const lastReset = profile?.last_verification_reset
+      ? new Date(profile.last_verification_reset)
+      : null
+
+    if (!lastReset || lastReset < currentMonth) {
       scanCount = 0
     }
 
-    const isPremium = profile?.subscription_status === 'pro' || profile?.subscription_status === 'enterprise'
+    const isPremium = profile?.subscription_status === 'active' ||
+                      profile?.subscription_status === 'pro' ||
+                      profile?.subscription_status === 'enterprise'
     const scanLimit = isPremium ? 999999 : (profile?.scan_limit || 5)
     const remaining = Math.max(0, scanLimit - scanCount)
 
@@ -59,8 +63,8 @@ export async function GET() {
       scan_limit: scanLimit,
       remaining,
       is_premium: isPremium,
-      subscription_status: profile?.subscription_status || 'free',
-      month: currentMonth,
+      subscription_status: profile?.subscription_status || 'inactive',
+      month: new Date().toISOString().substring(0, 7),
     })
   } catch (error) {
     console.error('Erreur API usage:', error)
@@ -72,7 +76,7 @@ export async function GET() {
 }
 
 // POST: Incrementer le compteur de scans (appele avant chaque scan)
-export async function POST(request: NextRequest) {
+export async function POST() {
   try {
     const supabase = await createServerSupabaseClient()
 
@@ -84,29 +88,38 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const currentMonth = new Date().toISOString().substring(0, 7)
+    const currentMonth = new Date()
+    currentMonth.setDate(1)
+    currentMonth.setHours(0, 0, 0, 0)
 
     // Recuperer le profil actuel
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('subscription_status, scan_count_month, scan_month_ref, scan_limit')
+      .select('subscription_status, verification_count, last_verification_reset, scan_limit')
       .eq('id', user.id)
       .single()
 
-    if (profileError && profileError.code !== '42703') {
+    if (profileError) {
       console.error('Erreur profil:', profileError)
-      return NextResponse.json(
-        { error: profileError.message },
-        { status: 500 }
-      )
+      return NextResponse.json({
+        success: true,
+        can_scan: true,
+        error: 'Erreur de comptage, scan autorise',
+      })
     }
 
-    let scanCount = profile?.scan_count_month || 0
-    const isPremium = profile?.subscription_status === 'pro' || profile?.subscription_status === 'enterprise'
+    let scanCount = profile?.verification_count || 0
+    const isPremium = profile?.subscription_status === 'active' ||
+                      profile?.subscription_status === 'pro' ||
+                      profile?.subscription_status === 'enterprise'
     const scanLimit = isPremium ? 999999 : (profile?.scan_limit || 5)
 
     // Reset si nouveau mois
-    if (profile?.scan_month_ref !== currentMonth) {
+    const lastReset = profile?.last_verification_reset
+      ? new Date(profile.last_verification_reset)
+      : null
+
+    if (!lastReset || lastReset < currentMonth) {
       scanCount = 0
     }
 
@@ -129,14 +142,14 @@ export async function POST(request: NextRequest) {
     const { error: updateError } = await supabase
       .from('profiles')
       .update({
-        scan_count_month: newScanCount,
-        scan_month_ref: currentMonth,
+        verification_count: newScanCount,
+        last_verification_reset: new Date().toISOString(),
       })
       .eq('id', user.id)
 
-    if (updateError && updateError.code !== '42703') {
+    if (updateError) {
       console.error('Erreur update:', updateError)
-      // On continue quand meme - le scan ne doit pas etre bloque par une erreur de comptage
+      // On continue quand meme
     }
 
     return NextResponse.json({
@@ -149,7 +162,6 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error('Erreur API usage POST:', error)
-    // En cas d'erreur, on autorise le scan pour ne pas bloquer l'utilisateur
     return NextResponse.json({
       success: true,
       can_scan: true,

@@ -340,11 +340,11 @@ Contenu:
                 <div className="flex items-start justify-between">
                   <div className="flex items-start gap-4">
                     <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
-                      {doc.mime_type.includes('pdf') ? (
+                      {doc.file_name?.toLowerCase().endsWith('.pdf') ? (
                         <svg className="w-6 h-6 text-red-500" fill="currentColor" viewBox="0 0 24 24">
                           <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 2l5 5h-5V4zM8.5 13H10v4H8.5v-4zm2.5 0h1.5v4H11v-4zm2.5 0h1.5v4H13.5v-4z" />
                         </svg>
-                      ) : doc.mime_type.includes('image') ? (
+                      ) : doc.file_name?.match(/\.(jpg|jpeg|png|webp|gif)$/i) ? (
                         <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                         </svg>
@@ -355,12 +355,11 @@ Contenu:
                       )}
                     </div>
                     <div>
-                      <h3 className="font-medium text-gray-900">{doc.nom_fichier}</h3>
+                      <h3 className="font-medium text-gray-900">{doc.file_name}</h3>
                       <div className="flex items-center gap-3 mt-1 flex-wrap">
                         <span className={`px-2 py-0.5 text-xs rounded-full ${getDocTypeColor(doc.type_doc)}`}>
                           {getDocTypeLabel(doc.type_doc)}
                         </span>
-                        <span className="text-sm text-gray-500">{formatFileSize(doc.taille)}</span>
                         {doc.ocr_processed && (
                           <span className="px-2 py-0.5 text-xs bg-green-100 text-green-800 rounded-full">
                             OCR traite

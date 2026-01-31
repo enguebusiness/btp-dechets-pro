@@ -5,33 +5,50 @@ import { analyzeInvoiceWithGemini, analyzePdfWithGemini, calculateGlobalConformi
 export const maxDuration = 60 // Timeout de 60 secondes pour l'OCR
 
 // Fonction pour verifier et incrementer le compteur de scans
+// Utilise verification_count et last_verification_reset existants
 async function checkAndIncrementScanCount(
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
   userId: string
 ): Promise<{ canScan: boolean; scanCount: number; scanLimit: number; remaining: number; isPremium: boolean }> {
-  const currentMonth = new Date().toISOString().substring(0, 7) // YYYY-MM
+  const currentMonth = new Date()
+  currentMonth.setDate(1)
+  currentMonth.setHours(0, 0, 0, 0)
 
   try {
     // Recuperer le profil actuel
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('subscription_status, scan_count_month, scan_month_ref, scan_limit')
+      .select('subscription_status, verification_count, last_verification_reset, scan_limit')
       .eq('id', userId)
       .single()
 
-    if (profileError && profileError.code !== '42703') {
+    if (profileError) {
       console.error('Erreur profil:', profileError)
-      // En cas d'erreur, autoriser le scan
+      // En cas d'erreur, autoriser le scan pour ne pas bloquer
       return { canScan: true, scanCount: 0, scanLimit: 5, remaining: 5, isPremium: false }
     }
 
-    let scanCount = profile?.scan_count_month || 0
-    const isPremium = profile?.subscription_status === 'pro' || profile?.subscription_status === 'enterprise'
+    let scanCount = profile?.verification_count || 0
+    const isPremium = profile?.subscription_status === 'active' ||
+                      profile?.subscription_status === 'pro' ||
+                      profile?.subscription_status === 'enterprise'
     const scanLimit = isPremium ? 999999 : (profile?.scan_limit || 5)
 
-    // Reset si nouveau mois
-    if (profile?.scan_month_ref !== currentMonth) {
+    // Verifier si on doit reset le compteur (nouveau mois)
+    const lastReset = profile?.last_verification_reset
+      ? new Date(profile.last_verification_reset)
+      : null
+
+    if (!lastReset || lastReset < currentMonth) {
+      // Nouveau mois - reset le compteur
       scanCount = 0
+      await supabase
+        .from('profiles')
+        .update({
+          verification_count: 0,
+          last_verification_reset: new Date().toISOString(),
+        })
+        .eq('id', userId)
     }
 
     // Verifier si on peut scanner
@@ -50,8 +67,8 @@ async function checkAndIncrementScanCount(
     await supabase
       .from('profiles')
       .update({
-        scan_count_month: newScanCount,
-        scan_month_ref: currentMonth,
+        verification_count: newScanCount,
+        last_verification_reset: new Date().toISOString(),
       })
       .eq('id', userId)
 
@@ -93,7 +110,7 @@ export async function POST(request: NextRequest) {
           scan_limit: usageCheck.scanLimit,
           remaining: 0,
           is_premium: usageCheck.isPremium,
-          upgrade_message: 'Passez a Bio-Audit Premium pour des scans illimites a 20€/mois',
+          upgrade_message: 'Passez a Bio-Audit Premium pour des scans illimites a 20 euros/mois',
           upgrade_url: '/dashboard/settings?tab=abonnement',
         },
         { status: 403 }
@@ -137,12 +154,12 @@ export async function POST(request: NextRequest) {
     const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf']
     if (!allowedTypes.includes(file.type)) {
       return NextResponse.json(
-        { error: 'Type de fichier non supporté. Utilisez JPG, PNG, WebP ou PDF.' },
+        { error: 'Type de fichier non supporte. Utilisez JPG, PNG, WebP ou PDF.' },
         { status: 400 }
       )
     }
 
-    // Vérifier la taille (max 10MB)
+    // Verifier la taille (max 10MB)
     const maxSize = 10 * 1024 * 1024
     if (file.size > maxSize) {
       return NextResponse.json(
@@ -170,7 +187,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Vérifier le fournisseur via Agence Bio si SIREN détecté
+    // Verifier le fournisseur via Agence Bio si SIREN detecte
     let supplierVerification = null
     if (result.data.siren_fournisseur || result.data.fournisseur) {
       try {
@@ -214,38 +231,15 @@ export async function POST(request: NextRequest) {
           }
         }
       } catch (verifyError) {
-        console.error('Erreur vérification fournisseur:', verifyError)
-        // On continue sans la vérification
+        console.error('Erreur verification fournisseur:', verifyError)
+        // On continue sans la verification
       }
     }
 
-    // Calculer le score de conformité global
+    // Calculer le score de conformite global
     const conformityScore = calculateGlobalConformityScore(result.data.lignes)
 
-    // Logger l'analyse dans audit_logs (ignorer si table n'existe pas)
-    try {
-      await supabase.from('audit_logs').insert({
-        exploitation_id: exploitationId,
-        type: 'scan_facture',
-        entite_type: 'document',
-        action: `Scan facture: ${file.name}`,
-        details: {
-          filename: file.name,
-          filesize: file.size,
-          mimetype: file.type,
-          fournisseur: result.data.fournisseur,
-          siren_fournisseur: result.data.siren_fournisseur,
-          lignes_count: result.data.lignes.length,
-          conformity_score: conformityScore.score,
-          supplier_verified: supplierVerification?.found || false,
-        },
-        resultat: conformityScore.breakdown.non_conforme > 0 ? 'attention' : 'succes',
-      })
-    } catch {
-      // Table audit_logs peut ne pas exister
-    }
-
-    // Ajouter la vérification fournisseur aux données
+    // Ajouter la verification fournisseur aux donnees
     const enrichedData = {
       ...result.data,
       verification_fournisseur: supplierVerification,
@@ -258,6 +252,12 @@ export async function POST(request: NextRequest) {
       filename: file.name,
       filesize: file.size,
       mimetype: file.type,
+      usage: {
+        scan_count: usageCheck.scanCount,
+        scan_limit: usageCheck.scanLimit,
+        remaining: usageCheck.remaining,
+        is_premium: usageCheck.isPremium,
+      }
     })
   } catch (error) {
     console.error('Erreur OCR:', error)

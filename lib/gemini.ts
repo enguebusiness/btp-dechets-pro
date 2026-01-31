@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI, Part } from '@google/generative-ai'
-import type { OcrData, LigneFacture, ConformiteCheck, AnalyseConformiteIA, SupplierVerification } from '@/types/database'
+import type { OcrData, LigneFacture, ConformiteCheck, AnalyseConformiteIA } from '@/types/database'
 
 // Support pour les deux noms de variables d'environnement
 const API_KEY = process.env.GOOGLE_GENAI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY
@@ -10,99 +10,227 @@ if (!API_KEY) {
 
 const genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null
 
-// Utiliser Gemini 2.5 Flash pour de meilleures performances
+// Utiliser Gemini 2.0 Flash pour de meilleures performances
 const MODEL_NAME = 'gemini-2.0-flash'
 
-// Prompt Bio-Shield amélioré pour extraction multi-lignes + SIREN + analyse de conformité
-const INVOICE_EXTRACTION_PROMPT = `Tu es un expert en agriculture biologique, en réglementation INAO/Ecocert, et en analyse de factures.
-Analyse cette facture et extrais TOUTES les informations avec une attention particulière aux éléments de conformité Bio.
+// =============================================================================
+// TYPES POUR L'EXTRACTION AVANCEE
+// =============================================================================
 
-OBJECTIF PRINCIPAL:
-1. Extraire CHAQUE ligne de produit (pas seulement la première)
-2. Identifier le SIREN/SIRET du fournisseur
-3. Évaluer la conformité Bio de chaque produit selon le règlement (UE) 2018/848
-
-Retourne UNIQUEMENT un objet JSON valide (sans markdown, sans backticks, sans texte avant/après):
-{
-  "fournisseur": "raison sociale complète du fournisseur",
-  "siren_fournisseur": "SIREN 9 chiffres si visible",
-  "siret_fournisseur": "SIRET 14 chiffres si visible",
-  "numero_facture": "numéro de la facture",
-  "date_facture": "YYYY-MM-DD",
-  "total_ht": 0.00,
-  "total_ttc": 0.00,
-  "lignes": [
-    {
-      "id": "ligne_1",
-      "description": "nom complet et détaillé du produit",
-      "quantite": 0,
-      "unite": "kg/L/unité/sac/T/etc",
-      "prix_unitaire": 0.00,
-      "prix_total": 0.00,
-      "tva": 5.5,
-      "reference": "code/référence produit",
-      "is_bio": true,
-      "numero_lot": "numéro de lot si visible",
-      "conformite_status": "conforme",
-      "conformite_reason": "Produit certifié Bio AB/Ecocert",
-      "score_conformite": 95,
-      "analyse_ia": {
-        "status": "conforme",
-        "score": 95,
-        "raisons": ["Certification Bio visible", "Fournisseur connu"],
-        "recommandations": [],
-        "reglements_references": ["Règlement (UE) 2018/848 - Annexe II"]
-      },
-      "confidence": 0.95
-    }
-  ],
-  "raw_text": "texte brut principal extrait",
-  "confidence_score": 0.90
+export interface ExtractedItem {
+  raw_name: string           // Nom tel qu'écrit sur la facture
+  clean_name: string         // Nom nettoyé sans codes internes
+  lot_number: string | null  // Numéro de lot/batch
+  quantity: number           // Quantité numérique
+  unit: string              // kg, unités, litres, etc.
+  unit_price: number | null  // Prix unitaire
+  total_price: number | null // Prix total ligne
+  is_bio_certified: boolean
+  certification_marker: string | null  // Le symbole trouvé: "(1)", "(2)", "*", "AB", etc.
+  certification_type: string | null    // Type de certification identifié
+  confidence_score: number   // Score de confiance 0-1
+  bounding_box: BoundingBox | null  // Coordonnées pour surlignage
+  validation_warnings: string[]     // Alertes de validation
 }
 
-RÈGLES D'ANALYSE DE CONFORMITÉ BIO (Règlement UE 2018/848):
+export interface BoundingBox {
+  x: number       // Position X (0-1 normalisé)
+  y: number       // Position Y (0-1 normalisé)
+  width: number   // Largeur (0-1 normalisé)
+  height: number  // Hauteur (0-1 normalisé)
+  page: number    // Numéro de page (1-indexed)
+}
 
-🟢 CONFORME (score 80-100):
-- Mention "AB", "Agriculture Biologique", "Ecocert", "FR-BIO-XX" visible
-- Semences certifiées Bio
-- Engrais organiques (fumier, compost, guano)
-- Traitements autorisés en Bio (soufre, cuivre, huiles essentielles, Bacillus thuringiensis)
-- Produits avec numéro de lot Bio traçable
+export interface LegendEntry {
+  marker: string           // "(1)", "(2)", "*", etc.
+  meaning: string          // Signification complète
+  is_bio_indicator: boolean // Indique une certification Bio
+  certification_body: string | null // Organisme: Ecocert, Cosmos, etc.
+}
 
-🟠 ATTENTION (score 40-79):
-- Produit conventionnel chez un fournisseur mixte
-- Semences sans mention Bio explicite
-- Engrais avec origine non précisée
-- Produit nécessitant une dérogation INAO
-- Mention "issu de l'agriculture biologique" sans certification
-- Auxiliaires de culture (pièges, filets) - généralement OK
+export interface InvoiceMetadata {
+  vendor_name: string | null
+  vendor_siret: string | null
+  vendor_siren: string | null
+  vendor_address: string | null
+  invoice_id: string | null
+  invoice_date: string | null
+  delivery_note_number: string | null
+  order_number: string | null
+  total_ht: number | null
+  total_ttc: number | null
+  total_tva: number | null
+}
 
-🔴 NON CONFORME (score 0-39):
-- Pesticides de synthèse (glyphosate, deltaméthrine, métam-sodium, chlorpyrifos)
-- Engrais de synthèse (ammonitrate, urée, superphosphate, NPK chimique)
-- Herbicides chimiques
-- Semences OGM ou traitées chimiquement
-- Régulateurs de croissance de synthèse
-- Produits avec mention "non utilisable en agriculture biologique"
+export interface ChainOfThoughtAnalysis {
+  step1_constants: {
+    vendor_siret_found: string | null
+    vendor_siret_location: string | null
+    invoice_id_found: string | null
+    invoice_date_found: string | null
+  }
+  step2_legend: {
+    legend_found: boolean
+    legend_location: string | null
+    legend_entries: LegendEntry[]
+    bio_markers_identified: string[]
+  }
+  step3_table_structure: {
+    columns_detected: string[]
+    total_rows: number
+    pages_analyzed: number
+  }
+}
 
-INDICATEURS À RECHERCHER:
-- Logo AB (Agriculture Biologique)
-- Logo Eurofeuille
-- Mention "FR-BIO-XX" (organisme certificateur)
-- "Certifié Ecocert" / "Certifié Bureau Veritas"
-- "Utilisable en agriculture biologique" (UAB)
-- "Conforme au règlement CE 834/2007" ou "UE 2018/848"
+export interface AdvancedOcrResult {
+  success: boolean
+  metadata: InvoiceMetadata
+  chain_of_thought: ChainOfThoughtAnalysis
+  items: ExtractedItem[]
+  raw_text: string | null
+  global_confidence: number
+  processing_warnings: string[]
+  error: string | null
+}
 
-EXTRACTION DU SIREN/SIRET:
-- Chercher un numéro à 9 chiffres (SIREN) ou 14 chiffres (SIRET)
-- Souvent près de "SIRET:", "SIREN:", "RCS", ou "N° TVA"
-- Format: XXX XXX XXX ou XXX XXX XXX XXXXX
+// =============================================================================
+// PROMPT CHAIN OF THOUGHT - EXTRACTION AVANCEE
+// =============================================================================
 
-Extrais ABSOLUMENT TOUTES les lignes produits visibles, même partiellement.`
+const CHAIN_OF_THOUGHT_PROMPT = `Tu es un expert OCR spécialisé dans l'extraction de factures pour l'agriculture biologique.
+Tu dois analyser ce document en suivant une méthodologie stricte "Chain of Thought".
+
+# ETAPE 1: IDENTIFICATION DES CONSTANTES
+Avant de lire les lignes, identifie et localise:
+- Le SIRET/SIREN du fournisseur (généralement en bas ou en-tête, format: XXX XXX XXX XXXXX)
+- Le numéro de facture
+- La date de facture
+- Le numéro de commande/BL si présent
+
+# ETAPE 2: ANALYSE DE LA LEGENDE
+CRITIQUE: Cherche une légende ou note de bas de page qui explique les symboles utilisés.
+Exemples courants:
+- "(1) indique les produits cosmétiques écologiques et biologiques (label Cosmos Organic)"
+- "(2) indique les produits issus de l'agriculture biologique certifiés par ECOCERT FR-BIO-01"
+- "* Produit certifié AB"
+- "(3) indique les cosmétiques écologiques (Label Cosmébio)"
+
+Pour CHAQUE symbole trouvé dans la légende, détermine s'il indique une certification Bio.
+
+# ETAPE 3: PARSING EXHAUSTIF DES LIGNES
+Parcours CHAQUE ligne du tableau de produits:
+- Extrait le nom BRUT exactement comme écrit
+- Nettoie le nom (enlève codes internes, références)
+- Identifie le marqueur de certification s'il existe (ex: "(1)" devant la référence)
+- Extrait le numéro de lot avec précision
+- Note les coordonnées approximatives de chaque élément critique
+
+# SCHEMA JSON OBLIGATOIRE
+
+Retourne UNIQUEMENT ce JSON (sans markdown, sans backticks):
+{
+  "metadata": {
+    "vendor_name": "Raison sociale complète",
+    "vendor_siret": "SIRET 14 chiffres ou null",
+    "vendor_siren": "SIREN 9 chiffres ou null",
+    "vendor_address": "Adresse complète ou null",
+    "invoice_id": "Numéro facture",
+    "invoice_date": "YYYY-MM-DD",
+    "delivery_note_number": "Numéro BL ou null",
+    "order_number": "Numéro commande ou null",
+    "total_ht": 0.00,
+    "total_ttc": 0.00,
+    "total_tva": 0.00
+  },
+  "chain_of_thought": {
+    "step1_constants": {
+      "vendor_siret_found": "41788089500038",
+      "vendor_siret_location": "bas de page, ligne SIRET",
+      "invoice_id_found": "DET2100791",
+      "invoice_date_found": "2021-06-08"
+    },
+    "step2_legend": {
+      "legend_found": true,
+      "legend_location": "pied de page avant le tableau des taxes",
+      "legend_entries": [
+        {
+          "marker": "(1)",
+          "meaning": "produits cosmétiques écologiques et biologiques (label Cosmos Organic)",
+          "is_bio_indicator": true,
+          "certification_body": "Cosmos Organic"
+        },
+        {
+          "marker": "(2)",
+          "meaning": "produits issus de l'agriculture biologique certifiés par ECOCERT FR-BIO-01",
+          "is_bio_indicator": true,
+          "certification_body": "ECOCERT"
+        }
+      ],
+      "bio_markers_identified": ["(1)", "(2)", "(3)"]
+    },
+    "step3_table_structure": {
+      "columns_detected": ["Vos Réf.", "Nos Réf.", "Désignation", "N° Lot", "Qté", "PU HT", "Rem.", "PU Net", "Total", "TVA"],
+      "total_rows": 25,
+      "pages_analyzed": 2
+    }
+  },
+  "items": [
+    {
+      "raw_name": "ROSÉE D'ALOÉ 76% Pur Aloé 250ml - Bio et Commerce Équitable - F",
+      "clean_name": "Rosée d'Aloé 76% Pur Aloé 250ml Bio Commerce Équitable",
+      "lot_number": "W015Y",
+      "quantity": 6,
+      "unit": "unités",
+      "unit_price": 5.86,
+      "total_price": 35.16,
+      "is_bio_certified": true,
+      "certification_marker": "(1)",
+      "certification_type": "Cosmos Organic",
+      "confidence_score": 0.95,
+      "bounding_box": {
+        "x": 0.15,
+        "y": 0.35,
+        "width": 0.7,
+        "height": 0.025,
+        "page": 1
+      },
+      "validation_warnings": []
+    }
+  ],
+  "raw_text": "Texte brut extrait des zones principales",
+  "global_confidence": 0.92,
+  "processing_warnings": []
+}
+
+# REGLES CRITIQUES
+
+1. SIRET: Format XXX XXX XXX XXXXX (14 chiffres). Souvent après "SIRET:" ou "RCS"
+2. Le marqueur de certification est TOUJOURS dans la colonne "Nos Réf." ou juste avant la désignation
+3. is_bio_certified = true SI ET SEULEMENT SI le marqueur trouvé correspond à un indicateur Bio dans la légende
+4. Si aucune légende n'est trouvée, cherche les mentions directes: "Bio", "AB", "Ecocert", "FR-BIO-XX"
+5. confidence_score:
+   - 0.95+ : Numéro de lot clairement lisible, certification explicite
+   - 0.80-0.94: Quelques caractères incertains mais lecture probable correcte
+   - 0.60-0.79: Lecture difficile, validation recommandée
+   - <0.60: Lecture très incertaine, vérification manuelle nécessaire
+6. bounding_box: Coordonnées normalisées (0-1) de la zone contenant le numéro de lot
+
+# POST-PROCESSING INTERNE
+
+Avant de retourner le JSON, vérifie:
+- Les numéros de lot ne contiennent pas de caractères incohérents (ex: "W01SY" vs "W015Y")
+- Les quantités sont des nombres positifs
+- Les prix sont cohérents (prix_total ≈ quantité × prix_unitaire)
+- Chaque produit avec un marqueur Bio a bien is_bio_certified = true`
+
+// =============================================================================
+// FONCTIONS PRINCIPALES
+// =============================================================================
 
 export interface GeminiOcrResult {
   success: boolean
   data: OcrData | null
+  advancedData: AdvancedOcrResult | null
   error: string | null
 }
 
@@ -132,50 +260,239 @@ function parseGeminiResponse(text: string): Record<string, unknown> {
   return JSON.parse(cleanedText)
 }
 
-// Fonction pour formater les données OCR
-function formatOcrData(parsedData: Record<string, unknown>): OcrData {
-  const lignes = (parsedData.lignes as Array<Record<string, unknown>>) || []
+// Post-processing pour valider et corriger les numéros de lot
+function validateAndCleanLotNumber(lotNumber: string | null): {
+  cleaned: string | null
+  confidence_adjustment: number
+  warnings: string[]
+} {
+  if (!lotNumber) {
+    return { cleaned: null, confidence_adjustment: 0, warnings: [] }
+  }
 
+  const warnings: string[] = []
+  let cleaned = lotNumber.trim()
+  let confidenceAdjustment = 0
+
+  // Patterns suspects dans les numéros de lot
+  const suspiciousPatterns = [
+    { pattern: /[Il1]/g, replacement: '1', reason: 'Confusion possible I/l/1' },
+    { pattern: /[O0]/g, replacement: '0', reason: 'Confusion possible O/0' },
+    { pattern: /[S5]/g, replacement: null, reason: 'Confusion possible S/5' },
+    { pattern: /[B8]/g, replacement: null, reason: 'Confusion possible B/8' },
+  ]
+
+  // Vérifier les caractères incohérents
+  if (/[^A-Za-z0-9\-\/]/.test(cleaned)) {
+    warnings.push('Caractères spéciaux inhabituels dans le numéro de lot')
+    confidenceAdjustment -= 0.1
+    // Nettoyer les caractères vraiment invalides
+    cleaned = cleaned.replace(/[^\w\-\/]/g, '')
+  }
+
+  // Vérifier la longueur
+  if (cleaned.length < 3) {
+    warnings.push('Numéro de lot trop court - vérification recommandée')
+    confidenceAdjustment -= 0.15
+  }
+
+  if (cleaned.length > 20) {
+    warnings.push('Numéro de lot anormalement long - vérification recommandée')
+    confidenceAdjustment -= 0.1
+  }
+
+  // Vérifier les confusions courantes
+  for (const { reason } of suspiciousPatterns) {
+    if (cleaned.match(/[IlO0S5B8]/)) {
+      warnings.push(reason)
+      confidenceAdjustment -= 0.05
+      break // Une seule alerte suffit
+    }
+  }
+
+  return { cleaned, confidence_adjustment: confidenceAdjustment, warnings }
+}
+
+// Convertir AdvancedOcrResult vers OcrData (format legacy)
+function convertToLegacyFormat(advanced: AdvancedOcrResult): OcrData {
   return {
-    fournisseur: (parsedData.fournisseur as string) || null,
-    siren_fournisseur: (parsedData.siren_fournisseur as string) || null,
-    siret_fournisseur: (parsedData.siret_fournisseur as string) || null,
-    numero_facture: (parsedData.numero_facture as string) || null,
-    date_facture: (parsedData.date_facture as string) || null,
-    total_ht: typeof parsedData.total_ht === 'number' ? parsedData.total_ht : null,
-    total_ttc: typeof parsedData.total_ttc === 'number' ? parsedData.total_ttc : null,
-    lignes: lignes.map((ligne, index): LigneFacture => {
-      const analyseIa = ligne.analyse_ia as Record<string, unknown> | null
-
-      return {
-        id: (ligne.id as string) || `ligne_${index + 1}`,
-        description: (ligne.description as string) || '',
-        quantite: typeof ligne.quantite === 'number' ? ligne.quantite : null,
-        unite: (ligne.unite as string) || null,
-        prix_unitaire: typeof ligne.prix_unitaire === 'number' ? ligne.prix_unitaire : null,
-        prix_total: typeof ligne.prix_total === 'number' ? ligne.prix_total : null,
-        tva: typeof ligne.tva === 'number' ? ligne.tva : null,
-        reference: (ligne.reference as string) || null,
-        is_bio: typeof ligne.is_bio === 'boolean' ? ligne.is_bio : null,
-        numero_lot: (ligne.numero_lot as string) || null,
-        conformite_status: (ligne.conformite_status as 'conforme' | 'attention' | 'non_conforme') || null,
-        conformite_reason: (ligne.conformite_reason as string) || null,
-        score_conformite: typeof ligne.score_conformite === 'number' ? ligne.score_conformite : null,
-        analyse_ia: analyseIa ? {
-          status: (analyseIa.status as 'conforme' | 'attention' | 'non_conforme') || 'attention',
-          score: typeof analyseIa.score === 'number' ? analyseIa.score : 50,
-          raisons: Array.isArray(analyseIa.raisons) ? analyseIa.raisons as string[] : [],
-          recommandations: Array.isArray(analyseIa.recommandations) ? analyseIa.recommandations as string[] : [],
-          reglements_references: Array.isArray(analyseIa.reglements_references) ? analyseIa.reglements_references as string[] : [],
-        } : null,
-        confidence: typeof ligne.confidence === 'number' ? ligne.confidence : 0.5,
-      }
-    }),
-    raw_text: (parsedData.raw_text as string) || null,
-    confidence_score: typeof parsedData.confidence_score === 'number' ? parsedData.confidence_score : null,
-    verification_fournisseur: null, // Sera rempli après vérification Agence Bio
+    fournisseur: advanced.metadata.vendor_name,
+    siren_fournisseur: advanced.metadata.vendor_siren,
+    siret_fournisseur: advanced.metadata.vendor_siret,
+    numero_facture: advanced.metadata.invoice_id,
+    date_facture: advanced.metadata.invoice_date,
+    total_ht: advanced.metadata.total_ht,
+    total_ttc: advanced.metadata.total_ttc,
+    lignes: advanced.items.map((item, index): LigneFacture => ({
+      id: `ligne_${index + 1}`,
+      description: item.clean_name,
+      quantite: item.quantity,
+      unite: item.unit,
+      prix_unitaire: item.unit_price,
+      prix_total: item.total_price,
+      tva: null, // Non extrait individuellement
+      reference: null,
+      is_bio: item.is_bio_certified,
+      numero_lot: item.lot_number,
+      conformite_status: item.is_bio_certified ? 'conforme' : 'attention',
+      conformite_reason: item.is_bio_certified
+        ? `Certifié ${item.certification_type || 'Bio'} (marqueur: ${item.certification_marker})`
+        : 'Certification Bio non identifiée',
+      score_conformite: Math.round(item.confidence_score * 100),
+      analyse_ia: {
+        status: item.is_bio_certified ? 'conforme' : 'attention',
+        score: Math.round(item.confidence_score * 100),
+        raisons: item.is_bio_certified
+          ? [`Marqueur ${item.certification_marker} identifié comme certification Bio`]
+          : ['Aucun marqueur de certification Bio trouvé'],
+        recommandations: item.validation_warnings.length > 0
+          ? ['Vérifier manuellement: ' + item.validation_warnings.join(', ')]
+          : [],
+        reglements_references: item.is_bio_certified
+          ? ['Règlement (UE) 2018/848']
+          : [],
+      },
+      confidence: item.confidence_score,
+    })),
+    raw_text: advanced.raw_text,
+    confidence_score: advanced.global_confidence,
+    verification_fournisseur: null,
   }
 }
+
+// Formater les données avancées depuis la réponse Gemini
+function formatAdvancedOcrData(parsedData: Record<string, unknown>): AdvancedOcrResult {
+  const metadata = (parsedData.metadata as Record<string, unknown>) || {}
+  const chainOfThought = (parsedData.chain_of_thought as Record<string, unknown>) || {}
+  const items = (parsedData.items as Array<Record<string, unknown>>) || []
+
+  // Extraire chain of thought
+  const step1 = (chainOfThought.step1_constants as Record<string, unknown>) || {}
+  const step2 = (chainOfThought.step2_legend as Record<string, unknown>) || {}
+  const step3 = (chainOfThought.step3_table_structure as Record<string, unknown>) || {}
+
+  // Formater les entrées de légende
+  const legendEntries: LegendEntry[] = Array.isArray(step2.legend_entries)
+    ? (step2.legend_entries as Array<Record<string, unknown>>).map(entry => ({
+        marker: (entry.marker as string) || '',
+        meaning: (entry.meaning as string) || '',
+        is_bio_indicator: (entry.is_bio_indicator as boolean) || false,
+        certification_body: (entry.certification_body as string) || null,
+      }))
+    : []
+
+  // Créer un lookup des marqueurs Bio
+  const bioMarkers = new Set(
+    legendEntries
+      .filter(e => e.is_bio_indicator)
+      .map(e => e.marker)
+  )
+
+  // Formater les items avec post-processing
+  const formattedItems: ExtractedItem[] = items.map(item => {
+    const rawLotNumber = (item.lot_number as string) || null
+    const lotValidation = validateAndCleanLotNumber(rawLotNumber)
+
+    // Déterminer si certifié Bio
+    const marker = (item.certification_marker as string) || null
+    const isBioCertified = marker ? bioMarkers.has(marker) : (item.is_bio_certified as boolean) || false
+
+    // Calculer le score de confiance ajusté
+    let confidence = typeof item.confidence_score === 'number'
+      ? item.confidence_score
+      : 0.7
+    confidence = Math.max(0, Math.min(1, confidence + lotValidation.confidence_adjustment))
+
+    // Extraire bounding box si présent
+    const bb = item.bounding_box as Record<string, unknown> | null
+    const boundingBox: BoundingBox | null = bb ? {
+      x: typeof bb.x === 'number' ? bb.x : 0,
+      y: typeof bb.y === 'number' ? bb.y : 0,
+      width: typeof bb.width === 'number' ? bb.width : 0,
+      height: typeof bb.height === 'number' ? bb.height : 0,
+      page: typeof bb.page === 'number' ? bb.page : 1,
+    } : null
+
+    // Trouver le type de certification depuis la légende
+    const certEntry = legendEntries.find(e => e.marker === marker)
+    const certificationType = certEntry?.certification_body || (item.certification_type as string) || null
+
+    return {
+      raw_name: (item.raw_name as string) || '',
+      clean_name: (item.clean_name as string) || (item.raw_name as string) || '',
+      lot_number: lotValidation.cleaned,
+      quantity: typeof item.quantity === 'number' ? item.quantity : 0,
+      unit: (item.unit as string) || 'unité',
+      unit_price: typeof item.unit_price === 'number' ? item.unit_price : null,
+      total_price: typeof item.total_price === 'number' ? item.total_price : null,
+      is_bio_certified: isBioCertified,
+      certification_marker: marker,
+      certification_type: certificationType,
+      confidence_score: confidence,
+      bounding_box: boundingBox,
+      validation_warnings: [
+        ...(Array.isArray(item.validation_warnings) ? item.validation_warnings as string[] : []),
+        ...lotValidation.warnings,
+      ],
+    }
+  })
+
+  // Calculer le score de confiance global
+  const avgConfidence = formattedItems.length > 0
+    ? formattedItems.reduce((sum, item) => sum + item.confidence_score, 0) / formattedItems.length
+    : 0.5
+
+  return {
+    success: true,
+    metadata: {
+      vendor_name: (metadata.vendor_name as string) || null,
+      vendor_siret: (metadata.vendor_siret as string) || null,
+      vendor_siren: (metadata.vendor_siren as string) || null,
+      vendor_address: (metadata.vendor_address as string) || null,
+      invoice_id: (metadata.invoice_id as string) || null,
+      invoice_date: (metadata.invoice_date as string) || null,
+      delivery_note_number: (metadata.delivery_note_number as string) || null,
+      order_number: (metadata.order_number as string) || null,
+      total_ht: typeof metadata.total_ht === 'number' ? metadata.total_ht : null,
+      total_ttc: typeof metadata.total_ttc === 'number' ? metadata.total_ttc : null,
+      total_tva: typeof metadata.total_tva === 'number' ? metadata.total_tva : null,
+    },
+    chain_of_thought: {
+      step1_constants: {
+        vendor_siret_found: (step1.vendor_siret_found as string) || null,
+        vendor_siret_location: (step1.vendor_siret_location as string) || null,
+        invoice_id_found: (step1.invoice_id_found as string) || null,
+        invoice_date_found: (step1.invoice_date_found as string) || null,
+      },
+      step2_legend: {
+        legend_found: (step2.legend_found as boolean) || false,
+        legend_location: (step2.legend_location as string) || null,
+        legend_entries: legendEntries,
+        bio_markers_identified: Array.isArray(step2.bio_markers_identified)
+          ? step2.bio_markers_identified as string[]
+          : [],
+      },
+      step3_table_structure: {
+        columns_detected: Array.isArray(step3.columns_detected)
+          ? step3.columns_detected as string[]
+          : [],
+        total_rows: typeof step3.total_rows === 'number' ? step3.total_rows : 0,
+        pages_analyzed: typeof step3.pages_analyzed === 'number' ? step3.pages_analyzed : 1,
+      },
+    },
+    items: formattedItems,
+    raw_text: (parsedData.raw_text as string) || null,
+    global_confidence: avgConfidence,
+    processing_warnings: Array.isArray(parsedData.processing_warnings)
+      ? parsedData.processing_warnings as string[]
+      : [],
+    error: null,
+  }
+}
+
+// =============================================================================
+// FONCTION PRINCIPALE D'ANALYSE
+// =============================================================================
 
 export async function analyzeInvoiceWithGemini(
   imageBase64: string,
@@ -185,6 +502,7 @@ export async function analyzeInvoiceWithGemini(
     return {
       success: false,
       data: null,
+      advancedData: null,
       error: 'Gemini API non configurée. Vérifiez GOOGLE_GENAI_API_KEY.',
     }
   }
@@ -193,9 +511,9 @@ export async function analyzeInvoiceWithGemini(
     const model = genAI.getGenerativeModel({
       model: MODEL_NAME,
       generationConfig: {
-        temperature: 0.1, // Plus déterministe pour l'extraction
+        temperature: 0.1, // Très bas pour éviter les hallucinations sur les numéros de lot
         topP: 0.95,
-        maxOutputTokens: 8192,
+        maxOutputTokens: 16384, // Augmenté pour les factures multi-pages
       },
     })
 
@@ -206,16 +524,18 @@ export async function analyzeInvoiceWithGemini(
       },
     }
 
-    const result = await model.generateContent([INVOICE_EXTRACTION_PROMPT, imagePart])
+    const result = await model.generateContent([CHAIN_OF_THOUGHT_PROMPT, imagePart])
     const response = result.response
     const text = response.text()
 
     const parsedData = parseGeminiResponse(text)
-    const ocrData = formatOcrData(parsedData)
+    const advancedData = formatAdvancedOcrData(parsedData)
+    const legacyData = convertToLegacyFormat(advancedData)
 
     return {
       success: true,
-      data: ocrData,
+      data: legacyData,
+      advancedData: advancedData,
       error: null,
     }
   } catch (error) {
@@ -223,6 +543,7 @@ export async function analyzeInvoiceWithGemini(
     return {
       success: false,
       data: null,
+      advancedData: null,
       error: error instanceof Error ? error.message : 'Erreur analyse OCR',
     }
   }
@@ -235,6 +556,7 @@ export async function analyzePdfWithGemini(
     return {
       success: false,
       data: null,
+      advancedData: null,
       error: 'Gemini API non configurée. Vérifiez GOOGLE_GENAI_API_KEY.',
     }
   }
@@ -245,7 +567,7 @@ export async function analyzePdfWithGemini(
       generationConfig: {
         temperature: 0.1,
         topP: 0.95,
-        maxOutputTokens: 8192,
+        maxOutputTokens: 16384,
       },
     })
 
@@ -256,16 +578,18 @@ export async function analyzePdfWithGemini(
       },
     }
 
-    const result = await model.generateContent([INVOICE_EXTRACTION_PROMPT, pdfPart])
+    const result = await model.generateContent([CHAIN_OF_THOUGHT_PROMPT, pdfPart])
     const response = result.response
     const text = response.text()
 
     const parsedData = parseGeminiResponse(text)
-    const ocrData = formatOcrData(parsedData)
+    const advancedData = formatAdvancedOcrData(parsedData)
+    const legacyData = convertToLegacyFormat(advancedData)
 
     return {
       success: true,
-      data: ocrData,
+      data: legacyData,
+      advancedData: advancedData,
       error: null,
     }
   } catch (error) {
@@ -273,12 +597,16 @@ export async function analyzePdfWithGemini(
     return {
       success: false,
       data: null,
+      advancedData: null,
       error: error instanceof Error ? error.message : 'Erreur analyse PDF',
     }
   }
 }
 
-// Analyse de conformité approfondie pour un produit
+// =============================================================================
+// ANALYSE DE CONFORMITE (INCHANGE)
+// =============================================================================
+
 const CONFORMITE_ANALYSIS_PROMPT = `Tu es un expert certifié INAO en agriculture biologique.
 Analyse ce produit et fournis une évaluation détaillée de sa conformité au règlement (UE) 2018/848.
 
@@ -385,6 +713,10 @@ export async function checkProductConformite(
     reglement_reference: analysis.reglements_references[0] || null,
   }
 }
+
+// =============================================================================
+// FONCTIONS UTILITAIRES
+// =============================================================================
 
 // Vérification de certificat fournisseur
 export async function checkSupplierCertificate(
@@ -493,3 +825,5 @@ export function getConformityBadge(status: 'conforme' | 'attention' | 'non_confo
       return { emoji: '⚪', label: 'Non évalué', color: 'text-gray-500', bgColor: 'bg-gray-100' }
   }
 }
+
+// Types are already exported via their interface declarations above

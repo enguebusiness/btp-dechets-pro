@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase-server'
-import { analyzeInvoiceWithGemini, analyzePdfWithGemini, calculateGlobalConformityScore } from '@/lib/gemini'
+import {
+  analyzeInvoiceWithGemini,
+  analyzePdfWithGemini,
+  calculateGlobalConformityScore,
+  type AdvancedOcrResult,
+} from '@/lib/gemini'
 
 export const maxDuration = 60 // Timeout de 60 secondes pour l'OCR
 
@@ -245,9 +250,24 @@ export async function POST(request: NextRequest) {
       verification_fournisseur: supplierVerification,
     }
 
+    // Preparer les donnees avancees avec verification fournisseur
+    const advancedData: AdvancedOcrResult | null = result.advancedData
+      ? {
+          ...result.advancedData,
+          // Ajouter info verification si trouvee
+          processing_warnings: supplierVerification?.found === false
+            ? [
+                ...result.advancedData.processing_warnings,
+                `Fournisseur "${result.data?.fournisseur}" non trouve dans l'annuaire Agence Bio`,
+              ]
+            : result.advancedData.processing_warnings,
+        }
+      : null
+
     return NextResponse.json({
       success: true,
       data: enrichedData,
+      advancedData: advancedData, // Nouvelles donnees avec Chain of Thought
       conformity: conformityScore,
       filename: file.name,
       filesize: file.size,
@@ -257,7 +277,17 @@ export async function POST(request: NextRequest) {
         scan_limit: usageCheck.scanLimit,
         remaining: usageCheck.remaining,
         is_premium: usageCheck.isPremium,
-      }
+      },
+      // Resumé de l'analyse pour l'UI
+      analysis_summary: advancedData ? {
+        total_items: advancedData.items.length,
+        bio_certified_items: advancedData.items.filter(i => i.is_bio_certified).length,
+        items_with_warnings: advancedData.items.filter(i => i.validation_warnings.length > 0).length,
+        legend_found: advancedData.chain_of_thought.step2_legend.legend_found,
+        bio_markers: advancedData.chain_of_thought.step2_legend.bio_markers_identified,
+        pages_analyzed: advancedData.chain_of_thought.step3_table_structure.pages_analyzed,
+        vendor_verified: supplierVerification?.found || false,
+      } : null,
     })
   } catch (error) {
     console.error('Erreur OCR:', error)
